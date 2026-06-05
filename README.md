@@ -55,11 +55,11 @@ The dataset `meta/info.json` field `codebase_version` should match the LeRobot c
 | Index Range | Joint Group     | Count | Notes                      |
 |-------------|-----------------|-------|----------------------------|
 | 0–4         | leg             | 5     | Leg joints                 |
-| 5–11        | right_arm       | 7     | Right arm joints           |
-| 12          | right_gripper   | 1     | Scaled by 0.01 in dataset  |
-| 13–19       | left_arm        | 7     | Left arm joints            |
-| 20          | left_gripper    | 1     | Scaled by 0.01 in dataset  |
-| 21–22       | head            | 2     | Head pan/tilt              |
+| 5–6         | head            | 2     | Head pan/tilt              |
+| 7–13        | left_arm        | 7     | Left arm joints            |
+| 14          | left_gripper    | 1     | Raw value / 1000, width in meters |
+| 15–21       | right_arm       | 7     | Right arm joints           |
+| 22          | right_gripper   | 1     | Raw value / 1000, width in meters |
 
 ### Camera Streams (4 cameras)
 
@@ -179,9 +179,9 @@ joint_sensor_map = {
 }
 ```
 
-Flattened to a 23-D array in order: `leg → right_arm → right_gripper → left_arm → left_gripper → head`
+Flattened to a 23-D array in order: `leg -> head -> left_arm -> left_gripper -> right_arm -> right_gripper`
 
-Gripper values are divided by 100 (`* 0.01`) for normalization.
+Gripper values are divided by 1000 and stored as meter-scale widths.
 
 ### Step 4: Action Definition
 

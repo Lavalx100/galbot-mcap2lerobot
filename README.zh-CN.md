@@ -55,11 +55,11 @@ python -m lerobot.datasets.v30.convert_dataset_v21_to_v30 --repo-id=<HF_USER/DAT
 | 索引范围 | 关节分组       | 数量 | 说明                      |
 |----------|----------------|------|-----------------------|
 | 0–4      | leg            | 5    | 腿部关节                |
-| 5–11     | right_arm      | 7    | 右臂关节                |
-| 12       | right_gripper  | 1    | 在数据集中按 0.01 缩放   |
-| 13–19    | left_arm       | 7    | 左臂关节                |
-| 20       | left_gripper   | 1    | 在数据集中按 0.01 缩放   |
-| 21–22    | head           | 2    | 头部云台（pan/tilt）    |
+| 5–6      | head           | 2    | 头部云台（pan/tilt）    |
+| 7–13     | left_arm       | 7    | 左臂关节                |
+| 14       | left_gripper   | 1    | 原始值 / 1000，单位为米   |
+| 15–21    | right_arm      | 7    | 右臂关节                |
+| 22       | right_gripper  | 1    | 原始值 / 1000，单位为米   |
 
 ### 相机流（4 路）
 
@@ -179,9 +179,9 @@ joint_sensor_map = {
 }
 ```
 
-最终会按顺序扁平为 23 维向量：`leg → right_arm → right_gripper → left_arm → left_gripper → head`
+最终会按顺序扁平为 23 维向量：`leg -> head -> left_arm -> left_gripper -> right_arm -> right_gripper`
 
-夹爪值会除以 100（`* 0.01`）做归一化。
+夹爪值会除以 1000，并以米制宽度写入数据集。
 
 ### 第 4 步：动作定义
 

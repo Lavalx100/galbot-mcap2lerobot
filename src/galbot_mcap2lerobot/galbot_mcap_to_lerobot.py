@@ -41,6 +41,13 @@ from tqdm import tqdm
 
 # Import local config and merge module
 from . import config
+from .joint_constants import (
+    GRIPPER_GROUPS,
+    GRIPPER_VALUE_SCALE,
+    JOINT_GROUP_ORDER,
+    JOINT_NAMES,
+    JOINT_STRUCTURE,
+)
 from .merge_lerobot_v2_1 import merge_datasets
 
 # ----------------------------
@@ -296,10 +303,11 @@ class McapToLeRobotDataset:
     ) -> np.ndarray:
         """Flatten joint sensor data into a 1-D array.
 
-        Order: leg(5) → right_arm(7) → right_gripper(1) → left_arm(7) →
-               left_gripper(1) → head(2)  = 23 dimensions.
+        Order: leg(5) -> head(2) -> left_arm(7) -> left_gripper(1) ->
+               right_arm(7) -> right_gripper(1) = 23 dimensions.
 
-        Gripper values are scaled by 0.01 to normalize their range.
+        Gripper position/velocity values are divided by 1000 and stored as
+        meter-scale gripper widths.
 
         Args:
             joint_sensor_map: Nested dict from Galbot's protobuf, e.g.:
@@ -311,20 +319,21 @@ class McapToLeRobotDataset:
             np.ndarray of shape (N,) with dtype float32.
         """
         flat_list: list[float] = []
-        for part in [
-            "leg",
-            "right_arm",
-            "right_gripper",
-            "left_arm",
-            "left_gripper",
-            "head",
-        ]:
+        for part in JOINT_GROUP_ORDER:
             if part not in joint_sensor_map:
                 continue
             part_data = joint_sensor_map[part]
-            flat_list.extend(part_data.get("position", []))
+            position_values = part_data.get("position", [])
+            if part in GRIPPER_GROUPS:
+                flat_list.extend(float(v) * GRIPPER_VALUE_SCALE for v in position_values)
+            else:
+                flat_list.extend(position_values)
             if use_velocity:
-                flat_list.extend(part_data.get("velocity", []))
+                velocity_values = part_data.get("velocity", [])
+                if part in GRIPPER_GROUPS:
+                    flat_list.extend(float(v) * GRIPPER_VALUE_SCALE for v in velocity_values)
+                else:
+                    flat_list.extend(velocity_values)
             if use_effort:
                 flat_list.extend(part_data.get("effort", []))
         return np.array(flat_list, dtype=np.float32)
@@ -344,11 +353,16 @@ class McapToLeRobotDataset:
         """
         features: dict[str, dict[str, Any]] = {}
 
-        # State / action dimension: 23 for Galbot G1
-        # Change this if you have a different joint count.
-        STATE_DIM = 23
-        features["observation.state"] = {"dtype": "float32", "shape": (STATE_DIM,)}
-        features["action"] = {"dtype": "float32", "shape": (STATE_DIM,)}
+        features["observation.state"] = {
+            "dtype": "float32",
+            "shape": (len(JOINT_NAMES),),
+            "names": JOINT_NAMES,
+        }
+        features["action"] = {
+            "dtype": "float32",
+            "shape": (len(JOINT_NAMES),),
+            "names": JOINT_NAMES,
+        }
 
         # Camera features — built dynamically from camera_info_buffers
         for info_topic, info in camera_info_buffers.items():
@@ -643,18 +657,11 @@ def generate_modality_json() -> dict[str, Any]:
     Returns:
         Dict with keys: "state", "action", "video", "annotation".
     """
-    joint_structure = {
-        "leg": {"start": 0, "end": 5},
-        "right_arm": {"start": 5, "end": 12},
-        "right_gripper": {"start": 12, "end": 13},
-        "left_arm": {"start": 13, "end": 20},
-        "left_gripper": {"start": 20, "end": 21},
-        "head": {"start": 21, "end": 23},
-    }
-
     return {
-        "state": joint_structure,
-        "action": joint_structure,
+        "state": JOINT_STRUCTURE,
+        "action": JOINT_STRUCTURE,
+        "state_names": JOINT_NAMES,
+        "action_names": JOINT_NAMES,
         "video": {
             "left_arm_camera_color": {"original_key": "observation.images.left_arm_camera_color"},
             "front_head_camera_left_color": {
@@ -676,6 +683,28 @@ def save_modality_json(output_dir: str) -> None:
     with open(modality_path, "w", encoding="utf-8") as f:
         json.dump(generate_modality_json(), f, indent=2, ensure_ascii=False)
     logger.info(f"Saved modality.json to {modality_path}")
+
+
+def ensure_info_joint_names(meta_dir: str) -> None:
+    """Ensure info.json carries explicit joint names for state/action vectors."""
+    info_path = os.path.join(meta_dir, "info.json")
+    if not os.path.isfile(info_path):
+        logger.warning(f"info.json not found, cannot add joint names: {info_path}")
+        return
+
+    with open(info_path, encoding="utf-8") as f:
+        info = json.load(f)
+
+    features = info.get("features", {})
+    for feature_key in ("observation.state", "action"):
+        feature = features.get(feature_key)
+        if isinstance(feature, dict):
+            feature["shape"] = [len(JOINT_NAMES)]
+            feature["names"] = JOINT_NAMES
+
+    with open(info_path, "w", encoding="utf-8") as f:
+        json.dump(info, f, indent=2, ensure_ascii=False)
+    logger.info(f"Ensured joint names in {info_path}")
 
 
 # ============================================================
@@ -787,6 +816,7 @@ def process_subset(
                 )
 
                 save_modality_json(os.path.join(output_subdir, "meta"))
+                ensure_info_joint_names(os.path.join(output_subdir, "meta"))
                 logger.info(f"[Worker {subset_idx + 1}] Finished {mcap_path}")
 
             except Exception as e:
@@ -898,6 +928,7 @@ def main(
         logger.info(f"Merged dataset saved to: {output_dir}")
 
         save_modality_json(os.path.join(output_dir, "meta"))
+        ensure_info_joint_names(os.path.join(output_dir, "meta"))
 
         # Clean up temporary worker directories
         for tmp_dir in generated_datasets:
