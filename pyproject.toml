@@ -26,6 +26,7 @@ dependencies = [
 [project.scripts]
 galbot-mcap2lerobot = "galbot_mcap2lerobot.galbot_mcap_to_lerobot:cli_main"
 merge-lerobot-v2-1 = "galbot_mcap2lerobot.merge_lerobot_v2_1:main"
+inspect-mcap = "galbot_mcap2lerobot.inspect_mcap:cli_main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

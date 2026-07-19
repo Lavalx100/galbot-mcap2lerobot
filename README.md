@@ -280,6 +280,21 @@ merge-lerobot-v2-1 \
     --output_folder merged_dataset
 ```
 
+### MCAP Inspection
+
+Inspect a raw `.mcap` file without running the full conversion pipeline — useful for checking topics, schemas, and message counts, or previewing decoded messages before converting.
+
+```bash
+# List topics/schemas/message counts
+inspect-mcap <file.mcap>
+
+# Decode and print sample messages from a topic
+inspect-mcap <file.mcap> --topic /front_head_camera/left_color/image_raw --limit 5
+
+# List embedded metadata records
+inspect-mcap <file.mcap> --metadata
+```
+
 ## License
 
 See the repository root for license information.

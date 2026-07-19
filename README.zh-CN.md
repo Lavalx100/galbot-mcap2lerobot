@@ -280,6 +280,21 @@ merge-lerobot-v2-1 \
     --output_folder merged_dataset
 ```
 
+### MCAP 文件检查
+
+在不运行完整转换流程的情况下检查原始 `.mcap` 文件——用于在转换前查看话题(topic)、schema、消息数量，或预览解码后的消息内容。
+
+```bash
+# 列出话题/schema/消息数量
+inspect-mcap <file.mcap>
+
+# 解码并打印某个话题的样例消息
+inspect-mcap <file.mcap> --topic /front_head_camera/left_color/image_raw --limit 5
+
+# 列出内嵌的元数据记录
+inspect-mcap <file.mcap> --metadata
+```
+
 ## 许可证
 
 请查看仓库根目录中的许可证文件。
