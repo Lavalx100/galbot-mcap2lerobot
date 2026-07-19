@@ -299,14 +299,24 @@ def copy_videos(
                         episode_index=old_index,
                     ),
                 ),
-                os.path.join(
-                    old_folder,
-                    video_path_template.format(
-                        episode_chunk=0, video_key=video_key, episode_index=0
-                    ),
-                ),
-                os.path.join(old_folder, f"videos/chunk-000/{video_key}/episode_000000.mp4"),
             ]
+            if old_index == 0:
+                # Fallback for per-mcap worker temp folders, which always
+                # contain exactly one episode named episode 0 regardless of
+                # video_path_template/chunk math. Only valid for
+                # old_index == 0 - otherwise this would silently substitute
+                # episode 0's video for a different, missing episode.
+                source_patterns.append(
+                    os.path.join(
+                        old_folder,
+                        video_path_template.format(
+                            episode_chunk=0, video_key=video_key, episode_index=0
+                        ),
+                    )
+                )
+                source_patterns.append(
+                    os.path.join(old_folder, f"videos/chunk-000/{video_key}/episode_000000.mp4")
+                )
 
             source_path = None
             for pattern in source_patterns:
@@ -327,32 +337,41 @@ def copy_videos(
                 print(f"Copying video: {source_path} -> {dest_path}")
                 shutil.copy2(source_path, dest_path)
             else:
-                # Fallback: recursive search
+                # Fallback: recursive search. Only safe for old_index == 0,
+                # since it can't tell which episode an .mp4 it finds belongs
+                # to - for any other episode it could silently substitute a
+                # different episode's video.
                 found = False
-                videos_dir = os.path.join(old_folder, "videos")
-                if os.path.isdir(videos_dir):
-                    for root, _, files in os.walk(videos_dir):
-                        for file in files:
-                            if file.endswith(".mp4") and video_key in root:
-                                source_path = os.path.join(root, file)
-                                dest_path = os.path.join(
-                                    output_folder,
-                                    video_path_template.format(
-                                        episode_chunk=new_chunk,
-                                        video_key=video_key,
-                                        episode_index=new_index,
-                                    ),
-                                )
-                                os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-                                shutil.copy2(source_path, dest_path)
-                                found = True
+                if old_index == 0:
+                    videos_dir = os.path.join(old_folder, "videos")
+                    if os.path.isdir(videos_dir):
+                        for root, _, files in os.walk(videos_dir):
+                            for file in files:
+                                if file.endswith(".mp4") and video_key in root:
+                                    source_path = os.path.join(root, file)
+                                    dest_path = os.path.join(
+                                        output_folder,
+                                        video_path_template.format(
+                                            episode_chunk=new_chunk,
+                                            video_key=video_key,
+                                            episode_index=new_index,
+                                        ),
+                                    )
+                                    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+                                    shutil.copy2(source_path, dest_path)
+                                    found = True
+                                    break
+                            if found:
                                 break
-                        if found:
-                            break
                 if not found:
-                    print(
-                        f"Warning: Video not found for {video_key}, "
-                        f"episode {old_index} in {old_folder}"
+                    # This episode's metadata (episodes.jsonl, stats, frame
+                    # counts) has already been merged in as if it were
+                    # complete. Continuing here would produce a dataset that
+                    # claims to have this video but doesn't. Abort rather
+                    # than write out incomplete data.
+                    raise RuntimeError(
+                        f"Video not found for {video_key}, episode {old_index} "
+                        f"in {old_folder} - refusing to merge with missing video data."
                     )
 
 
@@ -388,6 +407,8 @@ def merge_datasets(source_folders: list[str], output_folder: str) -> None:
     all_episodes = []
     all_episode_stats = []
     all_tasks = []
+    task_registry: dict[str, int] = {}  # task text -> merged task_index
+    folder_task_maps: dict[str, dict[int, int]] = {}  # folder -> {old_task_index: new_task_index}
     episode_mapping = []  # (old_folder, old_index, new_index)
     current_episode = 0
     current_frame = 0
@@ -405,6 +426,23 @@ def merge_datasets(source_folders: list[str], output_folder: str) -> None:
         ep_stats = load_jsonl(stats_path) if os.path.exists(stats_path) else []
         tasks = load_jsonl(tasks_path) if os.path.exists(tasks_path) else []
 
+        # Map this folder's task_index values onto a global registry keyed by
+        # task text, so identical tasks share one index and folders that reuse
+        # the same index for different tasks don't collide.
+        folder_task_map: dict[int, int] = {}
+        for task in tasks:
+            text = task.get("task")
+            old_task_index = task.get("task_index")
+            if text not in task_registry:
+                task_registry[text] = len(task_registry)
+                all_tasks.append({"task_index": task_registry[text], "task": text})
+            folder_task_map[old_task_index] = task_registry[text]
+        folder_task_maps[folder] = folder_task_map
+
+        # Track this folder's old->new episode_index mapping so per-episode
+        # stats (keyed by the folder-local episode_index) can be remapped too.
+        folder_episode_map: dict[int, int] = {}
+
         for ep in episodes:
             old_index = ep.get("episode_index", 0)
             new_index = current_episode
@@ -416,16 +454,27 @@ def merge_datasets(source_folders: list[str], output_folder: str) -> None:
             all_episodes.append(new_ep)
 
             episode_mapping.append((folder, old_index, new_index))
+            folder_episode_map[old_index] = new_index
             current_episode += 1
             current_frame += ep_length
 
-        all_episode_stats.extend(ep_stats)
-
-        for task in tasks:
-            if task not in all_tasks:
-                all_tasks.append(task)
+        for stat in ep_stats:
+            old_stat_index = stat.get("episode_index")
+            if old_stat_index not in folder_episode_map:
+                print(
+                    f"Warning: episodes_stats.jsonl entry {old_stat_index} in {folder} "
+                    "has no matching episode, skipping"
+                )
+                continue
+            new_stat = dict(stat)
+            new_stat["episode_index"] = folder_episode_map[old_stat_index]
+            all_episode_stats.append(new_stat)
 
     # --- Copy and reindex parquet files ---
+    # episode_mapping is in the same order new_index was assigned (0, 1, 2, ...),
+    # so accumulating frame_offset in this order yields a globally contiguous
+    # 'index' column, matching what a single-worker conversion would produce.
+    frame_offset = 0
     for old_folder, old_index, new_index in tqdm(episode_mapping, desc="Copying parquet"):
         old_chunk = old_index // info["chunks_size"]
         new_chunk = new_index // info["chunks_size"]
@@ -440,8 +489,16 @@ def merge_datasets(source_folders: list[str], output_folder: str) -> None:
                 old_folder,
                 data_path_template.format(episode_chunk=old_chunk, episode_index=old_index),
             ),
-            os.path.join(old_folder, "data/chunk-000/episode_000000.parquet"),
         ]
+        if old_index == 0:
+            # Fallback for per-mcap worker temp folders, which always contain
+            # exactly one episode named episode_000000.parquet regardless of
+            # data_path_template/chunk math. Only valid for old_index == 0 -
+            # otherwise this would silently substitute episode 0's data for a
+            # different, missing episode.
+            source_patterns.append(
+                os.path.join(old_folder, "data/chunk-000/episode_000000.parquet")
+            )
 
         source_path = None
         for pattern in source_patterns:
@@ -449,16 +506,47 @@ def merge_datasets(source_folders: list[str], output_folder: str) -> None:
                 source_path = pattern
                 break
 
-        if source_path:
-            dest_path = os.path.join(
-                output_folder,
-                data_path_template.format(episode_chunk=new_chunk, episode_index=new_index),
+        if source_path is None:
+            # This episode's metadata (episodes.jsonl, stats, frame counts)
+            # was already merged in earlier as if it were complete. Silently
+            # skipping here would leave a "ghost" episode in the output:
+            # present in metadata but with no parquet file on disk. Abort
+            # rather than write out an inconsistent dataset.
+            raise RuntimeError(
+                f"Parquet file not found for episode {old_index} in {old_folder} "
+                "- refusing to merge with missing frame data."
             )
-            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
 
-            df = pd.read_parquet(source_path)
-            df["episode_index"] = new_index
-            df.to_parquet(dest_path, index=False)
+        dest_path = os.path.join(
+            output_folder,
+            data_path_template.format(episode_chunk=new_chunk, episode_index=new_index),
+        )
+        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+
+        df = pd.read_parquet(source_path)
+        df["episode_index"] = new_index
+        if "task_index" in df.columns:
+            folder_task_map = folder_task_maps.get(old_folder, {})
+            mapped = df["task_index"].map(folder_task_map)
+            if mapped.isna().any():
+                # Some rows' task_index has no entry in this folder's
+                # tasks.jsonl (e.g. missing/empty tasks.jsonl). map()
+                # silently turns those into NaN, which would silently
+                # corrupt this int column and mislabel frames at training
+                # time. Abort rather than write out bad data.
+                unmapped = sorted(
+                    df.loc[mapped.isna(), "task_index"].unique().tolist()
+                )
+                raise RuntimeError(
+                    f"task_index {unmapped} in {old_folder} (episode {old_index}) "
+                    "has no entry in tasks.jsonl - refusing to merge with "
+                    "unresolvable task labels. Check tasks.jsonl for this folder."
+                )
+            df["task_index"] = mapped.astype(df["task_index"].dtype)
+        if "index" in df.columns:
+            df["index"] = np.arange(frame_offset, frame_offset + len(df))
+        frame_offset += len(df)
+        df.to_parquet(dest_path, index=False)
 
     # --- Copy videos ---
     copy_videos(valid_folders, output_folder, episode_mapping)
@@ -474,9 +562,17 @@ def merge_datasets(source_folders: list[str], output_folder: str) -> None:
     save_jsonl(all_episodes, os.path.join(output_folder, "meta", "episodes.jsonl"))
     save_jsonl(all_tasks, os.path.join(output_folder, "meta", "tasks.jsonl"))
 
-    # Update info.json
+    # Update info.json totals, which the template (copied from the first
+    # source folder) otherwise leaves stale for anything beyond that folder's
+    # own single-conversion episode count.
+    video_keys = [name for name, feat in info["features"].items() if feat.get("dtype") == "video"]
     info["total_episodes"] = current_episode
     info["total_frames"] = current_frame
+    info["total_tasks"] = len(all_tasks)
+    info["total_videos"] = current_episode * len(video_keys)
+    chunks_size = info["chunks_size"]
+    info["total_chunks"] = (current_episode - 1) // chunks_size + 1 if current_episode else 0
+    info["splits"] = {"train": f"0:{current_episode}"}
     with open(os.path.join(output_folder, "meta", "info.json"), "w") as f:
         json.dump(info, f, indent=2)
 

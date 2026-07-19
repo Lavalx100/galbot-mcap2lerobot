@@ -42,7 +42,7 @@ EXPORT_CONFIG: dict[str, Any] = {
     # default="/front_head_camera/left_color/image_raw"; primary timeline camera.
     "primary_camera_topic": "/front_head_camera/left_color/image_raw",
     # Task description annotated in every frame.
-    "task": "grip and pick up the long tubular part inside the box, then lift it.",
+    "task": "Default placeholder. Please replce this with the actual task instructions.",
 }
 
 # ---------------------------------------------------------------------------
@@ -81,3 +81,10 @@ STATE_TOPICS: list[str] = [
 # Each worker processes a subset of MCAP files independently, then results are merged.
 # Set to 1 for debugging. For production, use min(NUM_WORKERS, num_mcap_files).
 NUM_WORKERS: int = 10
+
+# Max allowed timestamp gap (in units of 1/fps frame periods) when matching a
+# non-primary camera frame to the primary camera's timestamp via nearest
+# neighbor. If the closest available frame is farther than this many frame
+# periods away (e.g. that camera dropped out mid-episode), conversion aborts
+# for that episode instead of silently reusing a stale frame.
+MAX_CAMERA_SYNC_GAP_FRAMES: float = 3

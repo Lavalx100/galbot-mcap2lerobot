@@ -541,6 +541,7 @@ class McapToLeRobotDataset:
 
         # --- Build frame list ---
         all_frames: list[dict[str, Any]] = []
+        max_sync_gap_ns = config.MAX_CAMERA_SYNC_GAP_FRAMES * (1_000_000_000 / self.fps)
 
         # Report current file.
         if progress_queue is not None and worker_idx is not None:
@@ -578,6 +579,19 @@ class McapToLeRobotDataset:
                 if not frames_with_ts:
                     continue
                 _closest_ts, idx = min(frames_with_ts, key=lambda x: abs(x[0] - head_ts))
+                if abs(_closest_ts - head_ts) > max_sync_gap_ns:
+                    # Closest available frame for this camera is farther from
+                    # the primary camera's timestamp than the allowed sync
+                    # gap (e.g. this camera dropped out mid-episode).
+                    # Reusing it anyway would silently freeze this camera's
+                    # video for the affected frames with no indication in
+                    # the output. Abort rather than write out misaligned data.
+                    raise RuntimeError(
+                        f"[{progress_label or self.repo_id}] Camera '{topic}' frame is "
+                        f"{abs(_closest_ts - head_ts) / 1e6:.1f}ms from head frame {head_idx} "
+                        f"(limit {max_sync_gap_ns / 1e6:.1f}ms) - refusing to align with a "
+                        f"stale frame. Check '{topic}' for dropped frames around this timestamp."
+                    )
                 _, decoded = frames[idx]
                 data_bytes = (
                     decoded.get("data")
@@ -620,11 +634,7 @@ class McapToLeRobotDataset:
             else:
                 all_frames[i]["action"] = all_frames[i]["observation.state"]
 
-            task = (
-                task_instruction
-                or "grip and pick up the long tubular part inside the box, then lift it."
-            )
-            self.dataset.add_frame(all_frames[i], task=task)
+            self.dataset.add_frame(all_frames[i], task=task_instruction)
 
             if progress_queue is not None and worker_idx is not None:
                 write_updates += 1
@@ -804,7 +814,7 @@ def process_subset(
                     ),
                 )
 
-                task_instruction = export_config.get("task", mcap_path.stem)
+                task_instruction = export_config.get("task", "")
                 converter.add_mcap_episode(
                     image_buffers,
                     state_buffers,
