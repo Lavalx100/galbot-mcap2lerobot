@@ -654,19 +654,12 @@ class McapToLeRobotDataset:
 
 
 # ============================================================
-# Modality metadata
+# Human-readable modality metadata
 # ============================================================
 
 
 def generate_modality_json() -> dict[str, Any]:
-    """Generate modality.json content defining joint index mapping.
-
-    The structure maps joint group names to their index ranges in the
-    23-D state/action vectors. Customize this for your robot.
-
-    Returns:
-        Dict with keys: "state", "action", "video", "annotation".
-    """
+    """Generate a readable summary of the state/action and camera layout."""
     return {
         "state": JOINT_STRUCTURE,
         "action": JOINT_STRUCTURE,
@@ -687,7 +680,7 @@ def generate_modality_json() -> dict[str, Any]:
 
 
 def save_modality_json(output_dir: str) -> None:
-    """Save modality.json to the dataset's meta directory."""
+    """Save the human-readable modality summary next to standard metadata."""
     os.makedirs(output_dir, exist_ok=True)
     modality_path = os.path.join(output_dir, "modality.json")
     with open(modality_path, "w", encoding="utf-8") as f:

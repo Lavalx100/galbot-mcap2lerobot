@@ -76,6 +76,132 @@ def save_jsonl(data: list[dict[str, Any]], file_path: str) -> None:
             f.write(json.dumps(item) + "\n")
 
 
+def validate_dataset_compatibility(source_folders: list[str]) -> dict[str, Any]:
+    """Validate source schemas using standard LeRobot ``info.json`` metadata.
+
+    A merge is only safe when every frame feature has the same meaning in all
+    sources. In particular, equal vector lengths are insufficient if joint
+    names or their order differ.
+
+    Returns:
+        The first source's ``info.json`` dictionary for use as the output
+        template.
+
+    Raises:
+        RuntimeError: If required joint names are missing or source schemas
+            differ.
+    """
+    infos: list[tuple[str, dict[str, Any]]] = []
+    for folder in source_folders:
+        info_path = os.path.join(folder, "meta", "info.json")
+        if not os.path.isfile(info_path):
+            raise RuntimeError(f"info.json not found in {folder}; refusing to merge.")
+        with open(info_path) as f:
+            infos.append((info_path, json.load(f)))
+
+    reference_path, reference = infos[0]
+    reference_features = reference.get("features")
+    if not isinstance(reference_features, dict):
+        raise RuntimeError(f"features metadata is missing from {reference_path}.")
+
+    for feature_key in ("observation.state", "action"):
+        feature = reference_features.get(feature_key)
+        names = feature.get("names") if isinstance(feature, dict) else None
+        shape = feature.get("shape") if isinstance(feature, dict) else None
+        if not isinstance(names, list) or not names:
+            raise RuntimeError(
+                f"{feature_key}.names is missing from {reference_path}; "
+                "regenerate the dataset with the current converter before merging."
+            )
+        if not isinstance(shape, list) or not shape or shape[0] != len(names):
+            raise RuntimeError(
+                f"{feature_key}.shape and names are inconsistent in {reference_path}: "
+                f"shape={shape}, names={len(names)} entries."
+            )
+
+    layout_keys = (
+        "codebase_version",
+        "robot_type",
+        "fps",
+        "chunks_size",
+        "data_path",
+        "video_path",
+    )
+    for candidate_path, candidate in infos[1:]:
+        for key in layout_keys:
+            if candidate.get(key) != reference.get(key):
+                raise RuntimeError(
+                    f"Incompatible info.json field '{key}': {candidate_path} has "
+                    f"{candidate.get(key)!r}, but {reference_path} has {reference.get(key)!r}."
+                )
+
+        candidate_features = candidate.get("features")
+        if candidate_features != reference_features:
+            reference_keys = set(reference_features)
+            candidate_keys = set(candidate_features or {})
+            if candidate_keys != reference_keys:
+                raise RuntimeError(
+                    f"Incompatible feature set in {candidate_path}: missing "
+                    f"{sorted(reference_keys - candidate_keys)}, extra "
+                    f"{sorted(candidate_keys - reference_keys)}."
+                )
+            for feature_key in sorted(reference_keys):
+                if candidate_features[feature_key] != reference_features[feature_key]:
+                    raise RuntimeError(
+                        f"Incompatible feature definition for '{feature_key}' in {candidate_path}; "
+                        f"it differs from {reference_path}. Check dtype, shape, names, order, "
+                        "and video metadata before merging."
+                    )
+
+    return reference
+
+
+def get_common_modality_metadata(source_folders: list[str]) -> str | None:
+    """Return a common human-readable modality file when all sources have one.
+
+    This metadata is optional and never defines merge compatibility; the
+    official ``info.json`` schema has already been validated above.
+    """
+    paths = [os.path.join(folder, "meta", "modality.json") for folder in source_folders]
+    existing = [path for path in paths if os.path.isfile(path)]
+    if not existing:
+        return None
+    if len(existing) != len(paths):
+        return None
+
+    with open(existing[0]) as f:
+        reference = json.load(f)
+    for path in existing[1:]:
+        with open(path) as f:
+            if json.load(f) != reference:
+                raise RuntimeError(
+                    f"Readable modality metadata differs in {path}; "
+                    "regenerate the source metadata before merging."
+                )
+    return existing[0]
+
+
+def refresh_reindexed_stats(episode_stats: dict[str, Any], df: pd.DataFrame) -> None:
+    """Refresh stats for columns changed by the merge reindexing pass."""
+    stats = episode_stats.get("stats")
+    if not isinstance(stats, dict):
+        return
+
+    for column in ("episode_index", "index", "task_index"):
+        if column not in df.columns:
+            continue
+        values = df[column].to_numpy()
+        if len(values) == 0:
+            continue
+        stats[column] = {
+            "min": np.min(values, keepdims=True).tolist(),
+            "max": np.max(values, keepdims=True).tolist(),
+            "mean": np.mean(values, keepdims=True).tolist(),
+            "std": np.std(values, keepdims=True).tolist(),
+            "count": [len(values)],
+        }
+
+
 # ============================================================
 # Statistics Merging
 # ============================================================
@@ -395,18 +521,20 @@ def merge_datasets(source_folders: list[str], output_folder: str) -> None:
 
     print(f"Merging {len(valid_folders)} datasets into {output_folder}")
 
+    # Validate the official LeRobot schema before writing any output. This
+    # prevents equal-length but differently ordered joint vectors from being
+    # silently concatenated.
+    info = validate_dataset_compatibility(valid_folders)
+    modality_path = get_common_modality_metadata(valid_folders)
+
     os.makedirs(os.path.join(output_folder, "meta"), exist_ok=True)
     os.makedirs(os.path.join(output_folder, "data", "chunk-000"), exist_ok=True)
-
-    # --- Load info.json from first dataset as template ---
-    template_info_path = os.path.join(valid_folders[0], "meta", "info.json")
-    with open(template_info_path) as f:
-        info = json.load(f)
 
     # --- Merge episodes ---
     all_episodes = []
     all_episode_stats = []
     all_tasks = []
+    episode_stats_by_index: dict[int, dict[str, Any]] = {}
     task_registry: dict[str, int] = {}  # task text -> merged task_index
     folder_task_maps: dict[str, dict[int, int]] = {}  # folder -> {old_task_index: new_task_index}
     episode_mapping = []  # (old_folder, old_index, new_index)
@@ -469,6 +597,7 @@ def merge_datasets(source_folders: list[str], output_folder: str) -> None:
             new_stat = dict(stat)
             new_stat["episode_index"] = folder_episode_map[old_stat_index]
             all_episode_stats.append(new_stat)
+            episode_stats_by_index[new_stat["episode_index"]] = new_stat
 
     # --- Copy and reindex parquet files ---
     # episode_mapping is in the same order new_index was assigned (0, 1, 2, ...),
@@ -534,9 +663,7 @@ def merge_datasets(source_folders: list[str], output_folder: str) -> None:
                 # silently turns those into NaN, which would silently
                 # corrupt this int column and mislabel frames at training
                 # time. Abort rather than write out bad data.
-                unmapped = sorted(
-                    df.loc[mapped.isna(), "task_index"].unique().tolist()
-                )
+                unmapped = sorted(df.loc[mapped.isna(), "task_index"].unique().tolist())
                 raise RuntimeError(
                     f"task_index {unmapped} in {old_folder} (episode {old_index}) "
                     "has no entry in tasks.jsonl - refusing to merge with "
@@ -546,6 +673,8 @@ def merge_datasets(source_folders: list[str], output_folder: str) -> None:
         if "index" in df.columns:
             df["index"] = np.arange(frame_offset, frame_offset + len(df))
         frame_offset += len(df)
+        if new_index in episode_stats_by_index:
+            refresh_reindexed_stats(episode_stats_by_index[new_index], df)
         df.to_parquet(dest_path, index=False)
 
     # --- Copy videos ---
@@ -561,7 +690,8 @@ def merge_datasets(source_folders: list[str], output_folder: str) -> None:
     # --- Save metadata ---
     save_jsonl(all_episodes, os.path.join(output_folder, "meta", "episodes.jsonl"))
     save_jsonl(all_tasks, os.path.join(output_folder, "meta", "tasks.jsonl"))
-
+    if modality_path is not None:
+        shutil.copy2(modality_path, os.path.join(output_folder, "meta", "modality.json"))
     # Update info.json totals, which the template (copied from the first
     # source folder) otherwise leaves stale for anything beyond that folder's
     # own single-conversion episode count.

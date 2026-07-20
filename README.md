@@ -108,7 +108,7 @@ galbot-mcap2lerobot ./mcap ./output
 output_galbot/galbot_lerobot_dataset/
 ├── meta/
 │   ├── info.json                  # Dataset metadata (features, fps, robot_type)
-│   ├── modality.json              # Joint index mapping for state/action
+│   ├── modality.json              # Human-readable joint, camera, and annotation layout
 │   ├── episodes.jsonl             # Per-episode metadata
 │   ├── tasks.jsonl                # Task descriptions
 │   └── episodes_stats.jsonl       # Per-episode statistics (min/max/mean/std)

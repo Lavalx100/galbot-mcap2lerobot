@@ -108,7 +108,7 @@ galbot-mcap2lerobot ./mcap ./output
 output_galbot/galbot_lerobot_dataset/
 ├── meta/
 │   ├── info.json                  # 数据集元信息（features、fps、robot_type）
-│   ├── modality.json              # state/action 的关节索引映射
+│   ├── modality.json              # 便于阅读的关节、相机和标注布局
 │   ├── episodes.jsonl             # 每个 episode 的元信息
 │   ├── tasks.jsonl                # 任务描述
 │   └── episodes_stats.jsonl       # 每个 episode 的统计值（min/max/mean/std）
