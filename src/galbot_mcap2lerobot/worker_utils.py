@@ -13,9 +13,10 @@ def wait_for_workers(
 ) -> list[tuple[int, str]]:
     """Consume worker progress until all workers finish or exit unexpectedly.
 
-    Returns worker errors reported by ``process_subset`` as ``(worker_index, message)`` pairs.
-    A nonzero process exit without a completion event is treated as finished here so the parent
-    can join it and report the failure instead of waiting forever for a queue message.
+    Returns worker errors reported by ``process_subset`` and unexpected process exits as
+    ``(worker_index, message)`` pairs. Any process that exits without a completion event is
+    treated as finished here so the parent can join it and report the failure instead of
+    waiting forever for a queue message.
     """
     completed_workers: set[int] = set()
     worker_errors: list[tuple[int, str]] = []
@@ -25,8 +26,18 @@ def wait_for_workers(
             event, worker_idx, value = progress_queue.get(timeout=0.2)
         except Empty:
             for worker_idx, process in enumerate(processes):
-                if worker_idx not in completed_workers and process.exitcode not in (None, 0):
+                if worker_idx not in completed_workers and process.exitcode is not None:
                     completed_workers.add(worker_idx)
+                    worker_errors.append(
+                        (
+                            worker_idx,
+                            f"{process.name} exited with status {process.exitcode} "
+                            "without a completion event",
+                        )
+                    )
+                    bar = progress_bars[worker_idx]
+                    bar.set_description(f"Worker {worker_idx + 1} failed")
+                    bar.refresh()
             continue
 
         bar = progress_bars[worker_idx]
@@ -54,7 +65,7 @@ def raise_for_worker_failures(
     worker_errors: list[tuple[int, str]],
     processes: list[Any],
 ) -> None:
-    """Raise before merge when a worker reported an error or exited unsuccessfully."""
+    """Raise before merge when a worker reported an error or exited unexpectedly."""
     reported_worker_indices = {worker_idx for worker_idx, _ in worker_errors}
     failures = list(worker_errors)
     for worker_idx, process in enumerate(processes):

@@ -71,9 +71,23 @@ def test_worker_error_event_is_returned_and_worker_is_marked_done():
 
 
 def test_crashed_worker_without_completion_event_does_not_hang():
-    errors = wait_for_workers(FakeQueue(), [FakeProcess(exitcode=1)], [FakeProgressBar()])
+    process = FakeProcess(exitcode=1)
+    bar = FakeProgressBar()
+    errors = wait_for_workers(FakeQueue(), [process], [bar])
 
-    assert errors == []
+    assert errors == [(0, "Worker-0 exited with status 1 without a completion event")]
+    assert bar.descriptions == ["Worker 1 failed"]
+    with pytest.raises(RuntimeError, match="without a completion event"):
+        raise_for_worker_failures(errors, [process])
+
+
+def test_successful_exit_without_completion_event_does_not_hang():
+    process = FakeProcess(exitcode=0)
+    errors = wait_for_workers(FakeQueue(), [process], [FakeProgressBar()])
+
+    assert errors == [(0, "Worker-0 exited with status 0 without a completion event")]
+    with pytest.raises(RuntimeError, match="without a completion event"):
+        raise_for_worker_failures(errors, [process])
 
 
 def test_successful_progress_events_are_applied_until_worker_done():
